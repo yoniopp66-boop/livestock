@@ -1,33 +1,94 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import matplotlib.pyplot as plt
+import datetime as dt
+import time
 
-st.title("📈 Live Stock Price Tracker")
+# --- SETTINGS ---
+REFRESH_SECONDS = 60
 
-# User input for ticker
-ticker = st.text_input("Enter stock ticker (e.g., AAPL, TSLA, MSFT):", "AAPL")
+st.set_page_config(page_title="Live Stock Tracker", layout="wide")
 
-try:
-    stock = yf.Ticker(ticker)
+# --- HEADER ---
+st.title("📈 Live Stock & Portfolio Dashboard")
 
-    # Get recent data
-    hist = stock.history(period="5d", interval="1h")
+# --- AUTO REFRESH ---
+st_autorefresh = st.empty()
+st_autorefresh.text(f"Auto-refreshing every {REFRESH_SECONDS} seconds...")
+st_autorefresh = st_autorefresh
 
-    if hist.empty:
-        st.error("⚠️ No data found. Please check the ticker symbol.")
-    else:
-        st.subheader(f"Live Data for {ticker}")
-        st.write(hist.tail())
+# --- INPUT ---
+tickers = st.text_input("Enter stock tickers (comma separated)", "AAPL, MSFT, TSLA").upper().split(",")
+portfolio_mode = st.checkbox("Track Portfolio (add quantities)")
 
-        # Plot closing price
-        st.subheader("Price Trend (Last 5 Days, Hourly)")
-        fig, ax = plt.subplots()
-        ax.plot(hist.index, hist["Close"], label="Close Price")
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Price (USD)")
-        ax.legend()
-        st.pyplot(fig)
+portfolio_data = {}
+if portfolio_mode:
+    st.subheader("💼 Portfolio Input")
+    for t in tickers:
+        qty = st.number_input(f"Quantity of {t.strip()}", min_value=0, value=0)
+        portfolio_data[t.strip()] = qty
 
-except Exception as e:
-    st.error(f"❌ Failed to fetch data: {e}")
+# --- FETCH DATA ---
+start = dt.datetime.now() - dt.timedelta(days=180)
+end = dt.datetime.now()
+
+@st.cache_data(ttl=REFRESH_SECONDS)
+def load_data(ticker):
+    try:
+        data = yf.download(ticker, start=start, end=end, progress=False)
+        return data
+    except Exception as e:
+        st.error(f"Failed to fetch {ticker}: {e}")
+        return pd.DataFrame()
+
+# --- SHOW DATA ---
+portfolio_value = 0
+cols = st.columns(len(tickers))
+
+for i, ticker in enumerate(tickers):
+    ticker = ticker.strip()
+    if not ticker:
+        continue
+    data = load_data(ticker)
+
+    if data.empty:
+        continue
+
+    # --- Indicators ---
+    data["MA20"] = data["Close"].rolling(20).mean()
+    data["MA50"] = data["Close"].rolling(50).mean()
+    data["MA200"] = data["Close"].rolling(200).mean()
+
+    delta = data["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    data["RSI"] = 100 - (100 / (1 + rs))
+
+    data["EMA12"] = data["Close"].ewm(span=12, adjust=False).mean()
+    data["EMA26"] = data["Close"].ewm(span=26, adjust=False).mean()
+    data["MACD"] = data["EMA12"] - data["EMA26"]
+    data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
+
+    # --- Charts ---
+    with cols[i]:
+        st.subheader(f"📊 {ticker}")
+        st.line_chart(data[["Close", "MA20", "MA50", "MA200"]])
+        st.line_chart(data[["MACD", "Signal"]])
+        st.line_chart(data[["RSI"]])
+
+    # --- Portfolio value ---
+    if portfolio_mode and portfolio_data.get(ticker, 0) > 0:
+        latest_price = data["Close"].iloc[-1]
+        holding_value = portfolio_data[ticker] * latest_price
+        portfolio_value += holding_value
+
+# --- Portfolio Summary ---
+if portfolio_mode:
+    st.subheader("💼 Portfolio Summary")
+    st.write(f"Total Portfolio Value: **${portfolio_value:,.2f}**")
+
+# --- Auto refresh ---
+st_autorefresh = st.empty()
+st_autorefresh.text(f"Last refreshed: {dt.datetime.now().strftime('%H:%M:%S')}")
+st.experimental_rerun()
