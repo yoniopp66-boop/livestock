@@ -1,33 +1,33 @@
 import streamlit as st
-import requests
+import yfinance as yf
 import pandas as pd
-import datetime
+import matplotlib.pyplot as plt
 
-# Replace with your own Finnhub API key
-API_KEY = "YOUR_API_KEY"
-BASE_URL = "https://finnhub.io/api/v1"
+st.title("📈 Live Stock Price Tracker")
 
-st.title("📈 Live Stock Tracker")
+# User input for ticker
+ticker = st.text_input("Enter stock ticker (e.g., AAPL, TSLA, MSFT):", "AAPL")
 
-# Input box for ticker symbol
-ticker = st.text_input("Enter stock symbol (e.g., AAPL, MSFT, TSLA):", "AAPL")
+try:
+    stock = yf.Ticker(ticker)
 
-def get_quote(symbol):
-    url = f"{BASE_URL}/quote"
-    params = {"symbol": symbol, "token": API_KEY}
-    r = requests.get(url, params=params)
-    if r.status_code == 200:
-        return r.json()
+    # Get recent data
+    hist = stock.history(period="5d", interval="1h")
+
+    if hist.empty:
+        st.error("⚠️ No data found. Please check the ticker symbol.")
     else:
-        return None
+        st.subheader(f"Live Data for {ticker}")
+        st.write(hist.tail())
 
-if st.button("Get Live Price"):
-    data = get_quote(ticker)
-    if data:
-        st.success(f"**{ticker}** Live Price: ${data['c']}")
-        st.write(f"Open: {data['o']}")
-        st.write(f"High: {data['h']}")
-        st.write(f"Low: {data['l']}")
-        st.write(f"Previous Close: {data['pc']}")
-    else:
-        st.error("Failed to fetch data. Check the ticker or API key.")
+        # Plot closing price
+        st.subheader("Price Trend (Last 5 Days, Hourly)")
+        fig, ax = plt.subplots()
+        ax.plot(hist.index, hist["Close"], label="Close Price")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Price (USD)")
+        ax.legend()
+        st.pyplot(fig)
+
+except Exception as e:
+    st.error(f"❌ Failed to fetch data: {e}")
