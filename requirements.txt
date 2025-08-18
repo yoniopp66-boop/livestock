@@ -1,4 +1,7 @@
 streamlit
 yfinance
 pandas
-matplotlib
+numpy
+requests
+pdfplumber
+streamlit-autorefresh
