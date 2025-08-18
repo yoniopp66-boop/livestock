@@ -1,105 +1,91 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-from datetime import datetime
+import yfinance as yf
+import finnhub
+import datetime
+import matplotlib.pyplot as plt
+import requests
 
-st.set_page_config(page_title="Portfolio Tracker", layout="wide")
+# --- API Keys ---
+FINNHUB_API_KEY = 'd2h3pphr01qon4eacl30d2h3pphr01qon4eacl3g'
+AI_API_KEY = 'c52961570ab5466badce46de90f8d380'
 
-st.title("📊 Portfolio Tracker")
+# Initialize Finnhub client
+finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
 
-st.sidebar.header("Add Stock to Portfolio")
-ticker = st.sidebar.text_input("Ticker (e.g. AAPL, TSLA, MSFT.L)")
-quantity = st.sidebar.number_input("Quantity", min_value=0, step=1)
-purchase_price = st.sidebar.number_input("Purchase Price (per share)", min_value=0.0, step=0.01)
-purchase_date = st.sidebar.date_input("Purchase Date", value=datetime(2024,1,1))
+# --- Load Portfolio CSV ---
+csv_path = '/mnt/data/from_2025-03-05_to_2025-08-17_MTc1NTQzNTg3NjEwNg.csv'
+portfolio_df = pd.read_csv(csv_path)
 
-if "portfolio" not in st.session_state:
-    st.session_state.portfolio = []
+# Expected CSV columns: Instrument, ISIN, Quantity, Price, Currency, PurchaseDate
 
-if st.sidebar.button("Add to Portfolio"):
-    if ticker and quantity > 0:
-        st.session_state.portfolio.append({
-            "ticker": ticker.upper(),
-            "quantity": quantity,
-            "purchase_price": purchase_price,
-            "purchase_date": purchase_date
-        })
-
-if not st.session_state.portfolio:
-    st.info("Add some stocks from the sidebar to start tracking your portfolio.")
-    st.stop()
-
-# Fetch live data from Yahoo Finance
-def fetch_data(ticker):
+# --- Helper Functions ---
+@st.cache_data
+def fetch_price(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.history(period="1d")
-        if not info.empty:
-            last_price = info["Close"].iloc[-1]
-            return last_price
-        else:
-            return None
-    except Exception as e:
+        data = yf.Ticker(ticker).fast_info
+        return data['last_price'] if 'last_price' in data else None
+    except:
         return None
 
-portfolio_data = []
-
-for stock in st.session_state.portfolio:
-    current_price = fetch_data(stock["ticker"])
-    if current_price:
-        value_now = current_price * stock["quantity"]
-        cost_basis = stock["purchase_price"] * stock["quantity"]
-        pl = value_now - cost_basis
-        pl_pct = (pl / cost_basis * 100) if cost_basis > 0 else 0
-        portfolio_data.append({
-            "Ticker": stock["ticker"],
-            "Quantity": stock["quantity"],
-            "Purchase Price": stock["purchase_price"],
-            "Purchase Date": stock["purchase_date"],
-            "Current Price": round(current_price,2),
-            "Current Value": round(value_now,2),
-            "P/L": round(pl,2),
-            "P/L %": round(pl_pct,2)
-        })
-    else:
-        portfolio_data.append({
-            "Ticker": stock["ticker"],
-            "Quantity": stock["quantity"],
-            "Purchase Price": stock["purchase_price"],
-            "Purchase Date": stock["purchase_date"],
-            "Current Price": "N/A",
-            "Current Value": "N/A",
-            "P/L": "N/A",
-            "P/L %": "N/A"
-        })
-
-# Display portfolio
-df = pd.DataFrame(portfolio_data)
-st.subheader("Portfolio Overview")
-st.dataframe(df, use_container_width=True)
-
-# Summary metrics
-valid_entries = [row for row in portfolio_data if isinstance(row["P/L"], (int, float))]
-if valid_entries:
-    total_value = sum(row["Current Value"] for row in valid_entries)
-    total_cost = sum(row["Purchase Price"] * row["Quantity"] for row in valid_entries)
-    total_pl = total_value - total_cost
-    total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("💰 Total Portfolio Value", f"${total_value:,.2f}")
-    col2.metric("📈 Total P/L", f"${total_pl:,.2f}", f"{total_pl_pct:.2f}%")
-    col3.metric("📊 Number of Holdings", len(valid_entries))
-
-# Historical chart per stock
-st.subheader("Stock Performance Charts")
-for stock in st.session_state.portfolio:
-    st.write(f"### {stock['ticker']}")
+@st.cache_data
+def fetch_historical(ticker, period='1y'):
     try:
-        hist = yf.download(stock['ticker'], period="6mo", interval="1d")
-        if not hist.empty:
-            st.line_chart(hist['Close'])
-        else:
-            st.warning(f"No data available for {stock['ticker']}")
+        hist = yf.Ticker(ticker).history(period=period)
+        return hist[['Close']]
     except:
-        st.warning(f"Error fetching data for {stock['ticker']}")
+        return pd.DataFrame()
+
+@st.cache_data
+def ai_insights(text):
+    url = 'https://api.aimlapi.com/generate'  # example endpoint
+    payload = {
+        'api_key': AI_API_KEY,
+        'prompt': f'Analyze this stock portfolio data and provide insights: {text}',
+        'max_tokens': 300
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json().get('text', '')
+    except:
+        return 'AI Insights unavailable.'
+
+# --- Streamlit Layout ---
+st.set_page_config(page_title='📊 Portfolio Tracker', layout='wide')
+st.title('📈 Portfolio Tracker with AI Insights')
+
+# Fetch live prices and calculate total value
+portfolio_df['CurrentPrice'] = portfolio_df['Instrument'].apply(fetch_price)
+portfolio_df['TotalValue'] = portfolio_df['Quantity'] * portfolio_df['CurrentPrice']
+portfolio_df['ProfitLoss'] = portfolio_df['TotalValue'] - (portfolio_df['Quantity'] * portfolio_df['Price'])
+
+# Display Portfolio
+st.subheader('Portfolio Overview')
+st.dataframe(portfolio_df)
+
+# Portfolio Metrics
+st.subheader('Portfolio Metrics')
+total_value = portfolio_df['TotalValue'].sum()
+total_invested = (portfolio_df['Quantity'] * portfolio_df['Price']).sum()
+total_profit = total_value - total_invested
+st.metric('Total Invested', f'{total_invested:.2f} GBP')
+st.metric('Current Value', f'{total_value:.2f} GBP')
+st.metric('Total Profit / Loss', f'{total_profit:.2f} GBP')
+
+# Charts
+st.subheader('Portfolio Distribution')
+fig, ax = plt.subplots()
+ax.pie(portfolio_df['TotalValue'], labels=portfolio_df['Instrument'], autopct='%1.1f%%')
+st.pyplot(fig)
+
+st.subheader('Price History Charts')
+for ticker in portfolio_df['Instrument']:
+    hist = fetch_historical(ticker)
+    if not hist.empty:
+        st.line_chart(hist['Close'], use_container_width=True)
+
+# AI Insights
+st.subheader('AI Insights')
+portfolio_text = portfolio_df.to_string()
+insights = ai_insights(portfolio_text)
+st.write(insights)
