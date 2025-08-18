@@ -1,94 +1,154 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import datetime as dt
 import time
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import streamlit as st
 
-# --- SETTINGS ---
-REFRESH_SECONDS = 60
-
-st.set_page_config(page_title="Live Stock Tracker", layout="wide")
-
-# --- HEADER ---
+st.set_page_config(page_title="Live Stock & Portfolio Dashboard", layout="wide")
 st.title("📈 Live Stock & Portfolio Dashboard")
 
-# --- AUTO REFRESH ---
-st_autorefresh = st.empty()
-st_autorefresh.text(f"Auto-refreshing every {REFRESH_SECONDS} seconds...")
-st_autorefresh = st_autorefresh
+# --- Sidebar controls ---
+with st.sidebar:
+    tickers_text = st.text_input(
+        "Tickers (comma-separated)", 
+        "AAPL, MSFT, TSLA, BP.L"
+    )
+    tickers = [t.strip().upper() for t in tickers_text.split(",") if t.strip()]
+    period = st.selectbox("History range", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=3)
+    interval_map = {"1d":"5m", "5d":"15m", "1mo":"1h", "3mo":"1d", "6mo":"1d", "1y":"1d"}
+    interval = interval_map[period]
 
-# --- INPUT ---
-tickers = st.text_input("Enter stock tickers (comma separated)", "AAPL, MSFT, TSLA").upper().split(",")
-portfolio_mode = st.checkbox("Track Portfolio (add quantities)")
+    refresh_secs = st.slider("Auto-refresh (seconds)", 10, 120, 60)
+    auto_refresh = st.checkbox("Enable auto-refresh", value=True)
 
-portfolio_data = {}
-if portfolio_mode:
-    st.subheader("💼 Portfolio Input")
-    for t in tickers:
-        qty = st.number_input(f"Quantity of {t.strip()}", min_value=0, value=0)
-        portfolio_data[t.strip()] = qty
+# Auto-refresh (safe & lightweight)
+try:
+    from streamlit_autorefresh import st_autorefresh
+    if auto_refresh:
+        st_autorefresh(interval=refresh_secs * 1000, key="auto")
+except Exception:
+    st.info("Auto-refresh helper not installed; page won’t auto-update. Click ‘Rerun’ to refresh.")
 
-# --- FETCH DATA ---
-start = dt.datetime.now() - dt.timedelta(days=180)
-end = dt.datetime.now()
+# --- Cached data loader ---
+@st.cache_data(ttl=120, show_spinner=False)
+def load_history(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False, threads=True)
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        df = df.dropna()
+    return df
 
-@st.cache_data(ttl=REFRESH_SECONDS)
-def load_data(ticker):
-    try:
-        data = yf.download(ticker, start=start, end=end, progress=False)
-        return data
-    except Exception as e:
-        st.error(f"Failed to fetch {ticker}: {e}")
-        return pd.DataFrame()
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    close = out["Close"]
+    # Moving Averages
+    out["MA20"] = close.rolling(20).mean()
+    out["MA50"] = close.rolling(50).mean()
+    out["MA200"] = close.rolling(200).mean()
+    # RSI(14)
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    out["RSI"] = 100 - (100 / (1 + rs))
+    # MACD
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    out["MACD"] = ema12 - ema26
+    out["Signal"] = out["MACD"].ewm(span=9, adjust=False).mean()
+    return out
 
-# --- SHOW DATA ---
-portfolio_value = 0
-cols = st.columns(len(tickers))
+# --- Top metrics row ---
+metrics_cols = st.columns(min(4, max(1, len(tickers))))
+latest_prices = {}  # for portfolio calc
 
-for i, ticker in enumerate(tickers):
-    ticker = ticker.strip()
-    if not ticker:
+for i, t in enumerate(tickers):
+    df = load_history(t, period, interval)
+    if df.empty:
+        metrics_cols[i % len(metrics_cols)].warning(f"{t}: no data")
         continue
-    data = load_data(ticker)
 
-    if data.empty:
+    last = df["Close"].iloc[-1]
+    prev = df["Close"].iloc[-2] if len(df) > 1 else last
+    chg = last - prev
+    pct = (chg / prev) * 100 if prev else 0
+    latest_prices[t] = float(last)
+
+    with metrics_cols[i % len(metrics_cols)]:
+        st.metric(label=t, value=f"{last:,.2f}", delta=f"{chg:,.2f} ({pct:.2f}%)")
+
+st.caption(f"Last updated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# --- Charts per ticker (with indicators) ---
+for t in tickers:
+    df = load_history(t, period, interval)
+    if df.empty:
         continue
+    df = add_indicators(df)
 
-    # --- Indicators ---
-    data["MA20"] = data["Close"].rolling(20).mean()
-    data["MA50"] = data["Close"].rolling(50).mean()
-    data["MA200"] = data["Close"].rolling(200).mean()
+    with st.expander(f"📊 {t} — charts & indicators", expanded=False):
+        # Price + MAs
+        st.line_chart(df[["Close", "MA20", "MA50", "MA200"]])
 
-    delta = data["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    data["RSI"] = 100 - (100 / (1 + rs))
+        # MACD
+        st.line_chart(df[["MACD", "Signal"]])
 
-    data["EMA12"] = data["Close"].ewm(span=12, adjust=False).mean()
-    data["EMA26"] = data["Close"].ewm(span=26, adjust=False).mean()
-    data["MACD"] = data["EMA12"] - data["EMA26"]
-    data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
+        # RSI
+        st.line_chart(df[["RSI"]])
 
-    # --- Charts ---
-    with cols[i]:
-        st.subheader(f"📊 {ticker}")
-        st.line_chart(data[["Close", "MA20", "MA50", "MA200"]])
-        st.line_chart(data[["MACD", "Signal"]])
-        st.line_chart(data[["RSI"]])
+# --- Portfolio tracker ---
+st.header("💼 Portfolio")
+if not tickers:
+    st.info("Add tickers above to start a portfolio.")
+else:
+    # Prefill editable table
+    if "portfolio_df" not in st.session_state:
+        st.session_state.portfolio_df = pd.DataFrame({
+            "Symbol": tickers,
+            "Quantity": [0]*len(tickers),
+            "AvgCost": [0.0]*len(tickers)
+        })
 
-    # --- Portfolio value ---
-    if portfolio_mode and portfolio_data.get(ticker, 0) > 0:
-        latest_price = data["Close"].iloc[-1]
-        holding_value = portfolio_data[ticker] * latest_price
-        portfolio_value += holding_value
+    # Ensure table includes any new tickers the user typed
+    existing = set(st.session_state.portfolio_df["Symbol"].str.upper())
+    missing = [t for t in tickers if t not in existing]
+    if missing:
+        add_rows = pd.DataFrame({"Symbol": missing, "Quantity": [0]*len(missing), "AvgCost":[0.0]*len(missing)})
+        st.session_state.portfolio_df = pd.concat([st.session_state.portfolio_df, add_rows], ignore_index=True)
 
-# --- Portfolio Summary ---
-if portfolio_mode:
-    st.subheader("💼 Portfolio Summary")
-    st.write(f"Total Portfolio Value: **${portfolio_value:,.2f}**")
+    edited = st.data_editor(
+        st.session_state.portfolio_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="portfolio_editor"
+    )
+    st.session_state.portfolio_df = edited
 
-# --- Auto refresh ---
-st_autorefresh = st.empty()
-st_autorefresh.text(f"Last refreshed: {dt.datetime.now().strftime('%H:%M:%S')}")
-st.experimental_rerun()
+    # Compute live valuation
+    port = edited.copy()
+    port["Symbol"] = port["Symbol"].str.upper()
+    port["LastPrice"] = port["Symbol"].map(latest_prices).fillna(0.0)
+    port["PositionValue"] = port["Quantity"] * port["LastPrice"]
+    port["UnrealizedPnL"] = (port["LastPrice"] - port["AvgCost"]) * port["Quantity"]
+
+    total_val = port["PositionValue"].sum()
+    total_pnl = port["UnrealizedPnL"].sum()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader(f"Total Portfolio Value: **${total_val:,.2f}**")
+    with c2:
+        st.subheader(f"Unrealized P/L: **${total_pnl:,.2f}**")
+
+    st.dataframe(port, use_container_width=True)
+2) Update requirements.txt
+Replace its contents with:
+
+nginx
+Edit
+streamlit
+yfinance
+pandas
+numpy
+streamlit-autorefresh
